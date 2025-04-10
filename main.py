@@ -102,6 +102,9 @@ def error_handler(update: Update, context: CallbackContext) -> None:
 
 def main() -> None:
     """Start the bot."""
+    print("Token exists:", "TELEGRAM_TOKEN" in os.environ)
+    print("Token length:", len(os.getenv('TELEGRAM_TOKEN', '')))
+    print("Token starts with:", os.getenv('TELEGRAM_TOKEN', '')[:10] + "...")
     updater = Updater(TOKEN)
     dispatcher = updater.dispatcher
 
