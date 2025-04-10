@@ -99,7 +99,28 @@ def handle_ai_response(update: Update, context: CallbackContext, text: str) -> N
 def error_handler(update: Update, context: CallbackContext) -> None:
     """Log errors."""
     logger.warning(f'Update {update} caused error {context.error}')
+# Add this right after your imports
+def validate_token(token: str) -> bool:
+    """Basic Telegram token validation"""
+    if not token:
+        return False
+    if '=' in token:
+        print("WARNING: Token contains unexpected = character")
+        return False
+    if ':' not in token:
+        return False
+    parts = token.split(':')
+    if len(parts) != 2:
+        return False
+    if not parts[0].isdigit():
+        return False
+    return True
 
+# Add this right before updater = Updater(TOKEN)
+if not validate_token(TOKEN):
+    print("FATAL: Invalid Telegram token format!")
+    print(f"Token: '{TOKEN}'")
+    exit(1)
 def main() -> None:
     """Start the bot."""
     print("Token exists:", "TELEGRAM_TOKEN" in os.environ)
