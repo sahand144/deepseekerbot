@@ -80,7 +80,7 @@ def handle_ai_response(update: Update, context: CallbackContext, text: str) -> N
         }
         
         response = requests.post(
-            "https://api-inference.huggingface.ai/models/gpt2",
+            "https://api-inference.huggingface.com/models/gpt2",
             headers=headers,
             json=payload
         )
