@@ -3,4 +3,5 @@ requests==2.31.0
 python-dotenv==1.0.0
 beautifulsoup4==4.12.2
 wikipedia==1.4.0
-redis==4.5.5  # For conversation memory
+redis==4.5.5
+httpx==0.24.1  # Important for async
