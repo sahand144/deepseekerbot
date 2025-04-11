@@ -1,188 +1,215 @@
 import os
 import logging
-from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Updater, 
-    CommandHandler, 
-    MessageHandler, 
-    Filters, 
-    CallbackContext,
-    CallbackQueryHandler
-)
 import requests
-import json
+import wikipedia
+from datetime import datetime
+from telegram import (
+    Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes
+)
+import redis
+from bs4 import BeautifulSoup
 
-# Enable logging
+# Configure logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Configuration
-TOKEN = os.getenv('TELEGRAM_TOKEN')
-HF_TOKEN = os.getenv('HF_TOKEN')
+# Initialize Redis
+r = redis.Redis(
+    host=os.getenv('REDIS_URL', 'redis://localhost:6379'),
+    decode_responses=True
+)
 
-# Crypto symbol mapping
-CRYPTO_MAP = {
-    'BTC': 'bitcoin',
-    'ETH': 'ethereum',
-    'DOGE': 'dogecoin',
-    'USDT': 'tether',
-    'BNB': 'binancecoin',
-    'XRP': 'ripple',
-    'ADA': 'cardano',
-    'SOL': 'solana',
-    'DOT': 'polkadot',
-    'SHIB': 'shiba-inu'
-}
+class CryptoManager:
+    @staticmethod
+    async def get_coin_data(coin_id: str):
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id.lower()}"
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            logger.error(f"Crypto API error: {e}")
+        return None
 
-def start(update: Update, context: CallbackContext) -> None:
-    """Send welcome message."""
-    keyboard = [
-        [InlineKeyboardButton("General Knowledge", callback_data='knowledge')],
-        [InlineKeyboardButton("Crypto Market", callback_data='crypto')],
-        [InlineKeyboardButton("AI Assistant", callback_data='ai')],
-        [InlineKeyboardButton("Date Help", callback_data='date')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text(
-        "Hi! I'm your improved AI Assistant.\nChoose an option:",
-        reply_markup=reply_markup
-    )
-
-def button(update: Update, context: CallbackContext) -> None:
-    """Handle button presses."""
-    query = update.callback_query
-    query.answer()
-    
-    if query.data == 'knowledge':
-        query.edit_message_text(text="Ask me anything about general knowledge!")
-    elif query.data == 'crypto':
-        query.edit_message_text(text="Send crypto symbol like BTC or ETH (now works for 10+ coins!)")
-    elif query.data == 'ai':
-        query.edit_message_text(text="Ask me anything and I'll respond with AI!")
-    elif query.data == 'date':
-        tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
-        query.edit_message_text(text=f"Tomorrow's date is {tomorrow}")
-
-def handle_message(update: Update, context: CallbackContext) -> None:
-    """Handle all messages."""
-    text = update.message.text.strip().upper()
-    
-    if text in CRYPTO_MAP or (text.isalpha() and len(text) <= 5):
-        handle_crypto(update, context, text)
-    elif text.lower().startswith(('date', 'time', 'today', 'tomorrow')):
-        handle_date_query(update, context, text)
-    else:
-        handle_ai_response(update, context, text)
-
-def handle_crypto(update: Update, context: CallbackContext, symbol: str) -> None:
-    """Get crypto price with improved API handling."""
-    try:
-        coin_id = CRYPTO_MAP.get(symbol, symbol.lower())
-        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}"
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            price = data['market_data']['current_price']['usd']
-            change = data['market_data']['price_change_percentage_24h']
-            update.message.reply_text(
-                f"💰 {symbol.upper()}: ${price:,.4f}\n"
-                f"24h Change: {change:.2f}%"
-            )
-        else:
-            update.message.reply_text("Crypto data not available. Try these: BTC, ETH, DOGE, USDT, BNB, XRP, ADA, SOL, DOT, SHIB")
-    except Exception as e:
-        logger.error(f"Crypto error: {e}")
-        update.message.reply_text("Error fetching crypto data. Please try again later.")
-
-def handle_date_query(update: Update, context: CallbackContext, text: str) -> None:
-    """Handle date/time queries locally."""
-    now = datetime.now()
-    if 'tomorrow' in text.lower():
-        date = (now + timedelta(days=1)).strftime('%Y-%m-%d')
-        update.message.reply_text(f"Tomorrow's date is {date}")
-    elif 'today' in text.lower():
-        update.message.reply_text(f"Today is {now.strftime('%Y-%m-%d')}")
-    else:
-        update.message.reply_text(f"Current date/time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
-
-def handle_ai_response(update: Update, context: CallbackContext, text: str) -> None:
-    """Generate AI response with better error handling."""
-    try:
-        # First try simple local responses
-        if '2+2' in text:
-            return update.message.reply_text("2 + 2 equals 4")
+class AIManager:
+    @staticmethod
+    async def get_ai_response(user_id: str, query: str):
+        # Check cache first
+        cached = r.get(f"ai:{user_id}:{query[:50]}")
+        if cached:
+            return cached
             
-        # Then fall back to Hugging Face
-        headers = {
-            "Authorization": f"Bearer {HF_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "inputs": text,
-            "parameters": {"max_length": 150, "temperature": 0.7}
-        }
-        
+        # Try DeepInfra (DeepSeeker)
+        try:
+            deepseek = await AIManager._query_deepseek(query)
+            if deepseek:
+                r.setex(f"ai:{user_id}:{query[:50]}", 3600, deepseek)  # Cache for 1 hour
+                return deepseek
+        except Exception as e:
+            logger.error(f"DeepSeeker error: {e}")
+
+        # Fallback to OpenRouter (ChatGPT)
+        try:
+            chatgpt = await AIManager._query_chatgpt(query)
+            if chatgpt:
+                return chatgpt
+        except Exception as e:
+            logger.error(f"ChatGPT error: {e}")
+
+        # Final fallback
+        return "I couldn't generate a response right now. Please try again later."
+
+    @staticmethod
+    async def _query_deepseek(query: str):
         response = requests.post(
-            "https://api-inference.huggingface.co/models/gpt2",
-            headers=headers,
-            json=payload,
+            "https://api.deepinfra.com/v1/openai/chat/completions",
+            headers={"Authorization": f"Bearer {os.getenv('DEEPINFRA_KEY')}"},
+            json={
+                "model": "deepseek-ai",
+                "messages": [{"role": "user", "content": query}]
+            },
             timeout=15
         )
-        
-        if response.status_code == 200:
-            result = response.json()
-            if isinstance(result, list) and len(result) > 0:
-                reply = result[0]['generated_text'].replace(text, '').strip()
-                update.message.reply_text(reply[:1000])  # Limit response length
-            else:
-                update.message.reply_text("I couldn't generate a response. Please try a different question.")
-        else:
-            logger.error(f"AI API error: {response.status_code} - {response.text}")
-            update.message.reply_text("My AI service is currently unavailable. Try asking about dates or crypto prices instead.")
-    except Exception as e:
-        logger.error(f"AI processing error: {e}")
-        update.message.reply_text("Sorry, I encountered an error. Please try again later.")
+        return response.json()['choices'][0]['message']['content']
 
-def error_handler(update: Update, context: CallbackContext) -> None:
-    """Log errors and notify user."""
-    logger.error(f"Update {update} caused error {context.error}")
-    try:
-        update.message.reply_text("An error occurred. Please try again later.")
-    except:
-        pass
+    @staticmethod
+    async def _query_chatgpt(query: str):
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {os.getenv('OPENROUTER_KEY')}"},
+            json={
+                "model": "openai/gpt-3.5-turbo",
+                "messages": [{"role": "user", "content": query}]
+            },
+            timeout=15
+        )
+        return response.json()['choices'][0]['message']['content']
 
-def main() -> None:
-    """Start the bot."""
-    updater = Updater(TOKEN)
-    dispatcher = updater.dispatcher
-
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("help", help_command))
-    dispatcher.add_handler(CallbackQueryHandler(button))
-    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    dispatcher.add_error_handler(error_handler)
-
-    updater.start_polling()
-    updater.idle()
-
-def help_command(update: Update, context: CallbackContext) -> None:
-    """Show help message."""
-    help_text = """
-    🤖 Bot Commands:
-    /start - Start the bot
-    /help - Show this help
-    /crypto [symbol] - Check crypto price
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    r.set(f"user:{user_id}:menu_pref", "grid")  # Default menu style
     
-    Features:
-    • Crypto prices for 10+ coins (BTC, ETH, etc.)
-    • Date/time information
-    • AI responses when available
-    """
-    update.message.reply_text(help_text)
+    await show_main_menu(update, user_id)
 
-if __name__ == '__main__':
+async def show_main_menu(update: Update, user_id: str):
+    menu_pref = r.get(f"user:{user_id}:menu_pref") or "grid"
+    
+    if menu_pref == "grid":
+        keyboard = [
+            [InlineKeyboardButton("💰 Crypto", callback_data="crypto"),
+             InlineKeyboardButton("🤖 AI Chat", callback_data="ai")],
+            [InlineKeyboardButton("🌐 Web Search", callback_data="search"),
+             InlineKeyboardButton("⚙️ Settings", callback_data="settings")]
+        ]
+    elif menu_pref == "list":
+        keyboard = [
+            [InlineKeyboardButton("1. Cryptocurrency Prices", callback_data="crypto")],
+            [InlineKeyboardButton("2. AI Assistant", callback_data="ai")],
+            [InlineKeyboardButton("3. Web Search", callback_data="search")],
+            [InlineKeyboardButton("4. Bot Settings", callback_data="settings")]
+        ]
+    else:  # hybrid
+        keyboard = [
+            [InlineKeyboardButton("Crypto Markets", callback_data="crypto")],
+            [InlineKeyboardButton("Chat with AI", callback_data="ai")],
+            [InlineKeyboardButton("Search Online", callback_data="search"),
+             InlineKeyboardButton("⚙", callback_data="settings")]
+        ]
+
+    await update.message.reply_text(
+        "🔹 Main Menu 🔹",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def handle_crypto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "Enter any cryptocurrency symbol or name (e.g. BTC, Ethereum):",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("↩ Back", callback_data="main_menu")]
+        ])
+    )
+
+async def handle_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "Ask me anything:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("↩ Back", callback_data="main_menu")]
+        ])
+    )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    # Check if in crypto mode
+    if r.get(f"user:{user_id}:mode") == "crypto":
+        coin_data = await CryptoManager.get_coin_data(text)
+        if coin_data:
+            message = f"""
+📊 {coin_data['name']} ({coin_data['symbol'].upper()})
+💰 Price: ${coin_data['market_data']['current_price']['usd']:,.4f}
+📈 24h Change: {coin_data['market_data']['price_change_percentage_24h']:.2f}%
+💎 Market Cap: ${coin_data['market_data']['market_cap']['usd']:,.2f}
+            """
+            await update.message.reply_markdown(message)
+        else:
+            await update.message.reply_text("Coin not found. Try symbols like BTC, ETH, SOL")
+        r.delete(f"user:{user_id}:mode")
+        await show_main_menu(update, user_id)
+    
+    # Check if in AI mode
+    elif r.get(f"user:{user_id}:mode") == "ai":
+        response = await AIManager.get_ai_response(user_id, text)
+        await update.message.reply_text(response)
+        await show_main_menu(update, user_id)
+    
+    # Default handling
+    else:
+        await update.message.reply_text("Please select an option from the menu:")
+        await show_main_menu(update, user_id)
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if query.data == "main_menu":
+        await show_main_menu(update, user_id)
+    elif query.data == "crypto":
+        r.set(f"user:{user_id}:mode", "crypto")
+        await handle_crypto(update, context)
+    elif query.data == "ai":
+        r.set(f"user:{user_id}:mode", "ai")
+        await handle_ai(update, context)
+    elif query.data.startswith("menu_"):
+        style = query.data.split("_")[1]
+        r.set(f"user:{user_id}:menu_pref", style)
+        await show_main_menu(update, user_id)
+
+def main():
+    app = ApplicationBuilder().token(os.getenv("TELEGRAM_TOKEN")).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    
+    app.run_polling()
+
+if __name__ == "__main__":
     main()
