@@ -36,6 +36,7 @@ try:
         socket_connect_timeout=5
     )
     r.ping()  # Test connection
+    logger.info("Redis connected successfully")
 except redis.RedisError as e:
     logger.error(f"Redis connection failed: {e}")
     raise
@@ -268,7 +269,6 @@ def create_application() -> Application:
         .read_timeout(30) \
         .write_timeout(30) \
         .connect_timeout(30) \
-        .pool_timeout(30) \
         .build()
 
 def main():
@@ -291,9 +291,7 @@ def main():
     try:
         app.run_polling(
             allowed_updates=Update.ALL_TYPES,
-            close_loop=False,
-            stop_signals=None,
-            relax=0.1
+            close_loop=False
         )
     except Conflict:
         logger.error("Another instance is already running. Exiting.")
