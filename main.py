@@ -318,7 +318,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(
                 "Coin not found. Try:\n- Full names (bitcoin, ethereum)\n- Symbols (BTC, ETH)\n\n" +
-                "Popular coins: " + ", ".join(POPULAR_COINS.keys())
+                "Popular coins: " + ", ".join(POPULAR_COINS.keys()))
         
         try:
             r.delete(f"user:{user_id}:mode")
